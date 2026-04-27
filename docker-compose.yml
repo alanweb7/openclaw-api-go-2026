@@ -1,0 +1,10 @@
+services:
+  openclaw-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/alanweb7/openclaw-2026-api-go:local
+    container_name: openclaw-bridge
+    env_file:
+      - .env
+    restart: unless-stopped
