@@ -107,8 +107,8 @@ func (c *Client) SendSessionMessage(ctx context.Context, sessionKey, message str
 		"id":     reqID,
 		"method": "sessions.send",
 		"params": map[string]any{
-			"sessionKey": sessionKey,
-			"message":    message,
+			"key":     sessionKey,
+			"message": message,
 		},
 	}
 
@@ -268,8 +268,8 @@ func (c *Client) sendAutoMessage(conn *websocket.Conn) error {
 		"id":     reqID,
 		"method": "sessions.send",
 		"params": map[string]any{
-			"sessionKey": c.cfg.OpenClawSessionKey,
-			"message":    c.cfg.AutoSendMessage,
+			"key":     c.cfg.OpenClawSessionKey,
+			"message": c.cfg.AutoSendMessage,
 		},
 	}
 	if err := conn.WriteJSON(payload); err != nil {
@@ -311,11 +311,17 @@ func extractSessionKey(frame map[string]any) string {
 	if v := getString(frame, "sessionKey"); v != "" {
 		return v
 	}
+	if v := getString(frame, "key"); v != "" {
+		return v
+	}
 	params, ok := frame["params"].(map[string]any)
 	if !ok || params == nil {
 		return ""
 	}
-	return getString(params, "sessionKey")
+	if v := getString(params, "sessionKey"); v != "" {
+		return v
+	}
+	return getString(params, "key")
 }
 
 func getString(data map[string]any, key string) string {
