@@ -155,7 +155,24 @@ func (c *Client) CreateSession(ctx context.Context, sessionKey string, opts Crea
 		return CreateSessionResult{}, err
 	}
 	if rawErr, ok := frame["error"]; ok && rawErr != nil {
-		return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErr)
+		rawErrText := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", rawErr)))
+		if (strings.Contains(rawErrText, "unexpected property 'workspace'") || strings.Contains(rawErrText, "unexpected property 'agentid'")) &&
+			(strings.TrimSpace(opts.Workspace) != "" || strings.TrimSpace(opts.AgentID) != "") {
+			c.logger.Warn("sessions.create rejected optional params; retrying without workspace/agentId")
+			fallbackParams := map[string]any{}
+			if strings.TrimSpace(sessionKey) != "" {
+				fallbackParams["key"] = strings.TrimSpace(sessionKey)
+			}
+			frame, err = c.callRPC(ctx, reqID+"-fallback", "sessions.create", fallbackParams)
+			if err != nil {
+				return CreateSessionResult{}, err
+			}
+			if rawErrFallback, ok := frame["error"]; ok && rawErrFallback != nil {
+				return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErrFallback)
+			}
+		} else {
+			return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErr)
+		}
 	}
 
 	normalizedInputKey := strings.TrimSpace(sessionKey)
