@@ -58,7 +58,19 @@ func (a *App) handleMessage(ctx context.Context, msg wsclient.Message) error {
 		return nil
 	}
 
-	if !events.ShouldForward(a.cfg, msg.EventType) {
+	a.logger.Info("ws event received",
+		"event_type", msg.EventType,
+		"session_key", msg.SessionKey,
+		"request_id", msg.RequestID,
+	)
+
+	shouldForward := events.ShouldForward(a.cfg, msg.EventType)
+	a.logger.Info("ws forward decision",
+		"event_type", msg.EventType,
+		"session_key", msg.SessionKey,
+		"should_forward", shouldForward,
+	)
+	if !shouldForward {
 		a.logger.Debug("event skipped by filter", "event_type", msg.EventType)
 		return nil
 	}
@@ -75,6 +87,12 @@ func (a *App) handleMessage(ctx context.Context, msg wsclient.Message) error {
 	if err != nil {
 		return fmt.Errorf("build webhook payload: %w", err)
 	}
+
+	a.logger.Info("webhook dispatching",
+		"event_type", msg.EventType,
+		"session_key", msg.SessionKey,
+		"request_id", msg.RequestID,
+	)
 
 	if err := a.webhook.Send(ctx, payload); err != nil {
 		return fmt.Errorf("send webhook event %s: %w", msg.EventType, err)
