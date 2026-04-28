@@ -203,6 +203,7 @@ func (c *Client) CreateSession(ctx context.Context, sessionKey string) (CreateSe
 			return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErr)
 		}
 
+		normalizedInputKey := strings.TrimSpace(sessionKey)
 		result := CreateSessionResult{RequestID: reqID}
 
 		// Some OpenClaw builds return payload under `result`, while others
@@ -222,6 +223,18 @@ func (c *Client) CreateSession(ctx context.Context, sessionKey string) (CreateSe
 		}
 		if result.SessionID == "" {
 			result.SessionID = getString(frame, "sessionId")
+		}
+		if result.SessionID == "" {
+			if rawResult, ok := frame["result"].(map[string]any); ok && rawResult != nil {
+				if entry, ok := rawResult["entry"].(map[string]any); ok && entry != nil {
+					result.SessionID = getString(entry, "sessionId")
+				}
+			}
+		}
+		// Some gateway builds return `ok=true` without echoing the key.
+		// In that case, when caller provided a key, keep operation successful.
+		if result.Key == "" && normalizedInputKey != "" {
+			result.Key = normalizedInputKey
 		}
 		if result.Key == "" {
 			return CreateSessionResult{}, fmt.Errorf("sessions.create returned empty key")
