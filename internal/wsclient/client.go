@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,16 @@ type Client struct {
 	logger    *slog.Logger
 	dialer    *websocket.Dialer
 	requestID uint64
+
+	mu      sync.Mutex
+	writeMu sync.Mutex
+	conn    *websocket.Conn
+	pending map[string]chan rpcResponse
+}
+
+type rpcResponse struct {
+	frame map[string]any
+	err   error
 }
 
 func New(cfg config.Config, logger *slog.Logger) *Client {
@@ -49,6 +60,7 @@ func New(cfg config.Config, logger *slog.Logger) *Client {
 			Proxy:            http.ProxyFromEnvironment,
 			HandshakeTimeout: 15 * time.Second,
 		},
+		pending: map[string]chan rpcResponse{},
 	}
 }
 
@@ -58,6 +70,8 @@ func (c *Client) Serve(ctx context.Context, onMessage func(context.Context, Mess
 		return err
 	}
 	defer conn.Close()
+	c.setActiveConn(conn)
+	defer c.clearActiveConn(fmt.Errorf("websocket connection closed"))
 
 	if c.cfg.AutoSendOnConnect {
 		if err := c.sendAutoMessage(conn); err != nil {
@@ -82,6 +96,9 @@ func (c *Client) Serve(ctx context.Context, onMessage func(context.Context, Mess
 			c.logger.Warn("invalid websocket frame", "error", err.Error())
 			continue
 		}
+		if c.resolvePending(frame) {
+			continue
+		}
 
 		msg := Message{
 			Type:       getString(frame, "type"),
@@ -101,146 +118,72 @@ func (c *Client) Serve(ctx context.Context, onMessage func(context.Context, Mess
 }
 
 func (c *Client) SendSessionMessage(ctx context.Context, sessionKey, message string) (string, error) {
-	conn, err := c.connect(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-
 	reqID := "send-" + strconv.FormatUint(c.nextID(), 10)
-	payload := map[string]any{
-		"type":   "req",
-		"id":     reqID,
-		"method": "sessions.send",
-		"params": map[string]any{
-			"key":     sessionKey,
-			"message": message,
-		},
+	frame, err := c.callRPC(ctx, reqID, "sessions.send", map[string]any{
+		"key":     sessionKey,
+		"message": message,
+	})
+	if err != nil {
+		return reqID, err
 	}
-
-	if err := conn.WriteJSON(payload); err != nil {
-		return "", fmt.Errorf("send sessions.send request: %w", err)
+	if rawErr, ok := frame["error"]; ok && rawErr != nil {
+		return reqID, fmt.Errorf("sessions.send rejected: %v", rawErr)
 	}
-
-	if err := conn.SetReadDeadline(time.Now().Add(requestTimeout)); err != nil {
-		return "", fmt.Errorf("set send request deadline: %w", err)
-	}
-	defer conn.SetReadDeadline(time.Time{})
-
-	for {
-		_, raw, err := conn.ReadMessage()
-		if err != nil {
-			return "", fmt.Errorf("read sessions.send response: %w", err)
-		}
-
-		frame, err := decodeFrame(raw)
-		if err != nil {
-			continue
-		}
-
-		if getString(frame, "type") != "res" {
-			continue
-		}
-		if getString(frame, "id") != reqID {
-			continue
-		}
-
-		if rawErr, ok := frame["error"]; ok && rawErr != nil {
-			return reqID, fmt.Errorf("sessions.send rejected: %v", rawErr)
-		}
-		return reqID, nil
-	}
+	return reqID, nil
 }
 
 func (c *Client) CreateSession(ctx context.Context, sessionKey string) (CreateSessionResult, error) {
-	conn, err := c.connect(ctx)
-	if err != nil {
-		return CreateSessionResult{}, err
-	}
-	defer conn.Close()
-
 	reqID := "create-" + strconv.FormatUint(c.nextID(), 10)
 	params := map[string]any{}
 	if strings.TrimSpace(sessionKey) != "" {
 		params["key"] = strings.TrimSpace(sessionKey)
 	}
 
-	payload := map[string]any{
-		"type":   "req",
-		"id":     reqID,
-		"method": "sessions.create",
-		"params": params,
+	frame, err := c.callRPC(ctx, reqID, "sessions.create", params)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	if rawErr, ok := frame["error"]; ok && rawErr != nil {
+		return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErr)
 	}
 
-	if err := conn.WriteJSON(payload); err != nil {
-		return CreateSessionResult{}, fmt.Errorf("send sessions.create request: %w", err)
+	normalizedInputKey := strings.TrimSpace(sessionKey)
+	result := CreateSessionResult{RequestID: reqID}
+
+	// Some OpenClaw builds return payload under `result`, while others
+	// return fields directly on the response frame.
+	if rawResult, ok := frame["result"].(map[string]any); ok && rawResult != nil {
+		result.Key = firstNonEmpty(
+			getString(rawResult, "key"),
+			getString(rawResult, "sessionKey"),
+		)
+		result.SessionID = getString(rawResult, "sessionId")
 	}
-
-	if err := conn.SetReadDeadline(time.Now().Add(requestTimeout)); err != nil {
-		return CreateSessionResult{}, fmt.Errorf("set create request deadline: %w", err)
+	if result.Key == "" {
+		result.Key = firstNonEmpty(
+			getString(frame, "key"),
+			getString(frame, "sessionKey"),
+		)
 	}
-	defer conn.SetReadDeadline(time.Time{})
-
-	for {
-		_, raw, err := conn.ReadMessage()
-		if err != nil {
-			return CreateSessionResult{}, fmt.Errorf("read sessions.create response: %w", err)
-		}
-
-		frame, err := decodeFrame(raw)
-		if err != nil {
-			continue
-		}
-
-		if getString(frame, "type") != "res" {
-			continue
-		}
-		if getString(frame, "id") != reqID {
-			continue
-		}
-
-		if rawErr, ok := frame["error"]; ok && rawErr != nil {
-			return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErr)
-		}
-
-		normalizedInputKey := strings.TrimSpace(sessionKey)
-		result := CreateSessionResult{RequestID: reqID}
-
-		// Some OpenClaw builds return payload under `result`, while others
-		// return fields directly on the response frame.
+	if result.SessionID == "" {
+		result.SessionID = getString(frame, "sessionId")
+	}
+	if result.SessionID == "" {
 		if rawResult, ok := frame["result"].(map[string]any); ok && rawResult != nil {
-			result.Key = firstNonEmpty(
-				getString(rawResult, "key"),
-				getString(rawResult, "sessionKey"),
-			)
-			result.SessionID = getString(rawResult, "sessionId")
-		}
-		if result.Key == "" {
-			result.Key = firstNonEmpty(
-				getString(frame, "key"),
-				getString(frame, "sessionKey"),
-			)
-		}
-		if result.SessionID == "" {
-			result.SessionID = getString(frame, "sessionId")
-		}
-		if result.SessionID == "" {
-			if rawResult, ok := frame["result"].(map[string]any); ok && rawResult != nil {
-				if entry, ok := rawResult["entry"].(map[string]any); ok && entry != nil {
-					result.SessionID = getString(entry, "sessionId")
-				}
+			if entry, ok := rawResult["entry"].(map[string]any); ok && entry != nil {
+				result.SessionID = getString(entry, "sessionId")
 			}
 		}
-		// Some gateway builds return `ok=true` without echoing the key.
-		// In that case, when caller provided a key, keep operation successful.
-		if result.Key == "" && normalizedInputKey != "" {
-			result.Key = normalizedInputKey
-		}
-		if result.Key == "" {
-			return CreateSessionResult{}, fmt.Errorf("sessions.create returned empty key")
-		}
-		return result, nil
 	}
+	// Some gateway builds return `ok=true` without echoing the key.
+	// In that case, when caller provided a key, keep operation successful.
+	if result.Key == "" && normalizedInputKey != "" {
+		result.Key = normalizedInputKey
+	}
+	if result.Key == "" {
+		return CreateSessionResult{}, fmt.Errorf("sessions.create returned empty key")
+	}
+	return result, nil
 }
 
 func (c *Client) handshake(_ context.Context, conn *websocket.Conn) error {
@@ -378,6 +321,105 @@ func (c *Client) sendAutoMessage(conn *websocket.Conn) error {
 
 func (c *Client) nextID() uint64 {
 	return atomic.AddUint64(&c.requestID, 1)
+}
+
+func (c *Client) callRPC(ctx context.Context, reqID, method string, params map[string]any) (map[string]any, error) {
+	conn := c.getActiveConn()
+	if conn == nil {
+		return nil, fmt.Errorf("websocket is not connected")
+	}
+
+	resCh := make(chan rpcResponse, 1)
+	c.mu.Lock()
+	c.pending[reqID] = resCh
+	c.mu.Unlock()
+	defer c.unregisterPending(reqID)
+
+	payload := map[string]any{
+		"type":   "req",
+		"id":     reqID,
+		"method": method,
+		"params": params,
+	}
+
+	c.writeMu.Lock()
+	err := conn.WriteJSON(payload)
+	c.writeMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("send %s request: %w", method, err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
+	select {
+	case <-waitCtx.Done():
+		return nil, fmt.Errorf("%s request timeout: %w", method, waitCtx.Err())
+	case res := <-resCh:
+		if res.err != nil {
+			return nil, res.err
+		}
+		return res.frame, nil
+	}
+}
+
+func (c *Client) resolvePending(frame map[string]any) bool {
+	if getString(frame, "type") != "res" {
+		return false
+	}
+	reqID := getString(frame, "id")
+	if reqID == "" {
+		return false
+	}
+
+	c.mu.Lock()
+	resCh, ok := c.pending[reqID]
+	if ok {
+		delete(c.pending, reqID)
+	}
+	c.mu.Unlock()
+	if !ok {
+		return false
+	}
+
+	select {
+	case resCh <- rpcResponse{frame: frame}:
+	default:
+	}
+	return true
+}
+
+func (c *Client) unregisterPending(reqID string) {
+	c.mu.Lock()
+	delete(c.pending, reqID)
+	c.mu.Unlock()
+}
+
+func (c *Client) setActiveConn(conn *websocket.Conn) {
+	c.mu.Lock()
+	c.conn = conn
+	c.mu.Unlock()
+}
+
+func (c *Client) getActiveConn() *websocket.Conn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn
+}
+
+func (c *Client) clearActiveConn(reason error) {
+	c.mu.Lock()
+	c.conn = nil
+	pending := c.pending
+	c.pending = map[string]chan rpcResponse{}
+	c.mu.Unlock()
+
+	for _, ch := range pending {
+		select {
+		case ch <- rpcResponse{err: reason}:
+		default:
+		}
+	}
 }
 
 func decodeFrame(raw []byte) (map[string]any, error) {
