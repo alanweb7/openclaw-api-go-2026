@@ -35,6 +35,11 @@ type CreateSessionResult struct {
 	RequestID string
 }
 
+type CreateSessionOptions struct {
+	Workspace string
+	AgentID   string
+}
+
 type Client struct {
 	cfg       config.Config
 	logger    *slog.Logger
@@ -132,11 +137,17 @@ func (c *Client) SendSessionMessage(ctx context.Context, sessionKey, message str
 	return reqID, nil
 }
 
-func (c *Client) CreateSession(ctx context.Context, sessionKey string) (CreateSessionResult, error) {
+func (c *Client) CreateSession(ctx context.Context, sessionKey string, opts CreateSessionOptions) (CreateSessionResult, error) {
 	reqID := "create-" + strconv.FormatUint(c.nextID(), 10)
 	params := map[string]any{}
 	if strings.TrimSpace(sessionKey) != "" {
 		params["key"] = strings.TrimSpace(sessionKey)
+	}
+	if strings.TrimSpace(opts.Workspace) != "" {
+		params["workspace"] = strings.TrimSpace(opts.Workspace)
+	}
+	if strings.TrimSpace(opts.AgentID) != "" {
+		params["agentId"] = strings.TrimSpace(opts.AgentID)
 	}
 
 	frame, err := c.callRPC(ctx, reqID, "sessions.create", params)

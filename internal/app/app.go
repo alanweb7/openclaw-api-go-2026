@@ -157,7 +157,11 @@ func (a *App) SendSessionMessage(ctx context.Context, sessionKey, message string
 }
 
 func (a *App) CreateSession(ctx context.Context, sessionKey string) (wsclient.CreateSessionResult, error) {
-	return a.ws.CreateSession(ctx, sessionKey)
+	return a.ws.CreateSession(ctx, sessionKey, wsclient.CreateSessionOptions{})
+}
+
+func (a *App) CreateSessionWithOptions(ctx context.Context, sessionKey string, opts wsclient.CreateSessionOptions) (wsclient.CreateSessionResult, error) {
+	return a.ws.CreateSession(ctx, sessionKey, opts)
 }
 
 func (a *App) SetSessionDelivery(sessionKey string, opts SessionDeliveryOptions) {

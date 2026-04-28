@@ -8,11 +8,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/alanweb7/openclaw-2026-api-go/internal/app"
 	"github.com/alanweb7/openclaw-2026-api-go/internal/config"
+	"github.com/alanweb7/openclaw-2026-api-go/internal/wsclient"
 )
 
 type Server struct {
@@ -27,6 +29,9 @@ type healthResponse struct {
 
 type sendRequest struct {
 	SessionKey    string `json:"sessionKey"`
+	AgentID       string `json:"agentId,omitempty"`
+	CustomerID    string `json:"customerId,omitempty"`
+	Workspace     string `json:"workspace,omitempty"`
 	Message       string `json:"message"`
 	CreateSession bool   `json:"createSession,omitempty"`
 	CallbackURL   string `json:"callbackUrl,omitempty"`
@@ -41,6 +46,9 @@ type sendResponse struct {
 
 type createSessionRequest struct {
 	SessionKey string `json:"sessionKey,omitempty"`
+	AgentID    string `json:"agentId,omitempty"`
+	CustomerID string `json:"customerId,omitempty"`
+	Workspace  string `json:"workspace,omitempty"`
 }
 
 type createSessionResponse struct {
@@ -119,6 +127,9 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	sessionKey := strings.TrimSpace(req.SessionKey)
 	if sessionKey == "" {
+		sessionKey = buildSessionKey(req.AgentID, req.CustomerID)
+	}
+	if sessionKey == "" {
 		sessionKey = s.cfg.OpenClawSessionKey
 	}
 	if sessionKey == "" {
@@ -162,7 +173,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	requestID, err := s.app.SendSessionMessage(r.Context(), sessionKey, req.Message)
 	if err != nil && req.CreateSession && strings.Contains(strings.ToLower(err.Error()), "session not found") {
 		s.logger.Info("session missing, creating automatically before retry", "session_key", sessionKey)
-		if _, createErr := s.app.CreateSession(r.Context(), sessionKey); createErr != nil {
+		if _, createErr := s.app.CreateSessionWithOptions(r.Context(), sessionKey, wsclient.CreateSessionOptions{
+			Workspace: strings.TrimSpace(req.Workspace),
+			AgentID:   strings.TrimSpace(req.AgentID),
+		}); createErr != nil {
 			s.logger.Error("failed to auto-create missing session", "error", createErr.Error(), "session_key", sessionKey)
 			http.Error(w, "failed to create missing openclaw session", http.StatusBadGateway)
 			return
@@ -196,7 +210,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionKey := strings.TrimSpace(req.SessionKey)
-	res, err := s.app.CreateSession(r.Context(), sessionKey)
+	if sessionKey == "" {
+		sessionKey = buildSessionKey(req.AgentID, req.CustomerID)
+	}
+
+	res, err := s.app.CreateSessionWithOptions(r.Context(), sessionKey, wsclient.CreateSessionOptions{
+		Workspace: strings.TrimSpace(req.Workspace),
+		AgentID:   strings.TrimSpace(req.AgentID),
+	})
 	if err != nil {
 		s.logger.Error("failed to create session", "error", err.Error(), "session_key", sessionKey)
 		http.Error(w, "failed to create openclaw session", http.StatusBadGateway)
@@ -215,4 +236,25 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+var nonIDChars = regexp.MustCompile(`[^a-zA-Z0-9._:-]+`)
+
+func buildSessionKey(agentID, customerID string) string {
+	agent := sanitizeID(agentID)
+	customer := sanitizeID(customerID)
+	if agent == "" || customer == "" {
+		return ""
+	}
+	return agent + ":" + customer
+}
+
+func sanitizeID(v string) string {
+	out := strings.TrimSpace(strings.ToLower(v))
+	if out == "" {
+		return ""
+	}
+	out = nonIDChars.ReplaceAllString(out, "-")
+	out = strings.Trim(out, "-:.")
+	return out
 }
