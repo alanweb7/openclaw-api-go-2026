@@ -26,8 +26,9 @@ type healthResponse struct {
 }
 
 type sendRequest struct {
-	SessionKey string `json:"sessionKey"`
-	Message    string `json:"message"`
+	SessionKey    string `json:"sessionKey"`
+	Message       string `json:"message"`
+	CreateSession bool   `json:"createSession,omitempty"`
 }
 
 type sendResponse struct {
@@ -127,6 +128,15 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestID, err := s.app.SendSessionMessage(r.Context(), sessionKey, req.Message)
+	if err != nil && req.CreateSession && strings.Contains(strings.ToLower(err.Error()), "session not found") {
+		s.logger.Info("session missing, creating automatically before retry", "session_key", sessionKey)
+		if _, createErr := s.app.CreateSession(r.Context(), sessionKey); createErr != nil {
+			s.logger.Error("failed to auto-create missing session", "error", createErr.Error(), "session_key", sessionKey)
+			http.Error(w, "failed to create missing openclaw session", http.StatusBadGateway)
+			return
+		}
+		requestID, err = s.app.SendSessionMessage(r.Context(), sessionKey, req.Message)
+	}
 	if err != nil {
 		s.logger.Error("failed to send session message", "error", err.Error(), "session_key", sessionKey)
 		http.Error(w, "failed to deliver message to openclaw", http.StatusBadGateway)
