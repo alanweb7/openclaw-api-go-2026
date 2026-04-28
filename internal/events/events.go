@@ -30,6 +30,9 @@ func ShouldForward(cfg config.Config, eventType string) bool {
 	switch eventType {
 	case "session.message":
 		return cfg.ForwardSessionMessage
+	case "agent":
+		// Newer OpenClaw builds can emit agent responses under "agent".
+		return cfg.ForwardSessionMessage
 	case "session.tool":
 		return cfg.ForwardSessionTool
 	case "sessions.changed":
@@ -80,6 +83,12 @@ func ExtractSessionKey(frame map[string]any) string {
 			return s
 		}
 	}
+	payload := getMap(frame, "payload")
+	if payload != nil {
+		if s := getString(payload, "sessionKey"); s != "" {
+			return s
+		}
+	}
 	return ""
 }
 
@@ -105,13 +114,23 @@ func normalize(in Incoming) map[string]any {
 	if params == nil {
 		params = map[string]any{}
 	}
+	payload := getMap(in.Data, "payload")
+	if payload == nil {
+		payload = map[string]any{}
+	}
 
 	switch in.EventType {
 	case "session.message":
 		return map[string]any{
 			"kind":  "agent_message",
-			"text":  extractText(params),
-			"agent": extractAgent(params, in.SessionKey),
+			"text":  firstNonEmpty(extractText(params), extractText(payload)),
+			"agent": firstNonEmpty(extractAgent(params, in.SessionKey), extractAgent(payload, in.SessionKey)),
+		}
+	case "agent":
+		return map[string]any{
+			"kind":  "agent_message",
+			"text":  firstNonEmpty(extractText(params), extractText(payload), extractText(in.Data)),
+			"agent": firstNonEmpty(extractAgent(params, in.SessionKey), extractAgent(payload, in.SessionKey), extractAgent(in.Data, in.SessionKey)),
 		}
 	case "session.tool":
 		return map[string]any{
