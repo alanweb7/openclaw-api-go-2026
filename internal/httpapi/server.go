@@ -31,6 +31,7 @@ type sendRequest struct {
 	CreateSession bool   `json:"createSession,omitempty"`
 	CallbackURL   string `json:"callbackUrl,omitempty"`
 	Stream        *bool  `json:"stream,omitempty"`
+	DedupeKey     string `json:"dedupeKey,omitempty"`
 }
 
 type sendResponse struct {
@@ -127,6 +128,20 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Message) == "" {
 		http.Error(w, "message is required", http.StatusBadRequest)
 		return
+	}
+
+	dedupeKey := strings.TrimSpace(req.DedupeKey)
+	if dedupeKey == "" {
+		dedupeKey = strings.TrimSpace(r.Header.Get("X-Idempotency-Key"))
+	}
+	if dedupeKey != "" {
+		isNew, dedupeErr := s.app.RegisterInboundDedupe(r.Context(), "in:"+dedupeKey)
+		if dedupeErr != nil {
+			s.logger.Warn("inbound dedupe check failed", "error", dedupeErr.Error())
+		} else if !isNew {
+			writeJSON(w, http.StatusOK, sendResponse{OK: true, RequestID: "duplicate"})
+			return
+		}
 	}
 	if callbackURL := strings.TrimSpace(req.CallbackURL); callbackURL != "" {
 		if !strings.HasPrefix(strings.ToLower(callbackURL), "http://") && !strings.HasPrefix(strings.ToLower(callbackURL), "https://") {

@@ -48,6 +48,10 @@ type Config struct {
 	LogLevel string
 
 	HTTPListenPort string
+
+	DatabaseURL      string
+	DeliveryTTL      time.Duration
+	DedupeRecordTTL  time.Duration
 }
 
 func Load() (Config, error) {
@@ -90,6 +94,10 @@ func Load() (Config, error) {
 		LogLevel: strings.ToLower(envOrDefault("LOG_LEVEL", "info")),
 
 		HTTPListenPort: envOrDefault("BRIDGE_HTTP_PORT", "8080"),
+
+		DatabaseURL:     strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DeliveryTTL:     time.Duration(intOrDefault("DELIVERY_TTL_SECONDS", 600)) * time.Second,
+		DedupeRecordTTL: time.Duration(intOrDefault("DEDUPE_RECORD_TTL_SECONDS", 86400)) * time.Second,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -124,6 +132,12 @@ func (c Config) Validate() error {
 	}
 	if c.WSReconnectDelay < 0 {
 		errs = append(errs, "WS_RECONNECT_DELAY_SECONDS must be >= 0")
+	}
+	if c.DeliveryTTL <= 0 {
+		errs = append(errs, "DELIVERY_TTL_SECONDS must be > 0")
+	}
+	if c.DedupeRecordTTL <= 0 {
+		errs = append(errs, "DEDUPE_RECORD_TTL_SECONDS must be > 0")
 	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))

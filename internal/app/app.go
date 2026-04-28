@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/alanweb7/openclaw-2026-api-go/internal/config"
 	"github.com/alanweb7/openclaw-2026-api-go/internal/events"
+	"github.com/alanweb7/openclaw-2026-api-go/internal/store"
 	"github.com/alanweb7/openclaw-2026-api-go/internal/webhook"
 	"github.com/alanweb7/openclaw-2026-api-go/internal/wsclient"
 )
@@ -19,6 +22,7 @@ type App struct {
 	logger  *slog.Logger
 	ws      *wsclient.Client
 	webhook *webhook.Client
+	store   *store.Store
 
 	mu       sync.Mutex
 	delivery map[string]SessionDeliveryOptions
@@ -30,12 +34,13 @@ type SessionDeliveryOptions struct {
 	CreatedAt   time.Time
 }
 
-func New(cfg config.Config, logger *slog.Logger) *App {
+func New(ctx context.Context, cfg config.Config, logger *slog.Logger) *App {
 	return &App{
 		cfg:     cfg,
 		logger:  logger.With("component", "app"),
 		ws:      wsclient.New(cfg, logger),
 		webhook: webhook.New(cfg, logger),
+		store:   store.New(ctx, cfg, logger),
 		delivery: map[string]SessionDeliveryOptions{},
 	}
 }
@@ -109,6 +114,21 @@ func (a *App) handleMessage(ctx context.Context, msg wsclient.Message) error {
 		return fmt.Errorf("build webhook payload: %w", err)
 	}
 
+	outboundDedupeKey := a.buildOutboundDedupeKey(msg)
+	if outboundDedupeKey != "" {
+		isNew, dedupeErr := a.store.RegisterDedupeKey(ctx, "outbound", outboundDedupeKey, a.cfg.DedupeRecordTTL)
+		if dedupeErr != nil {
+			a.logger.Warn("outbound dedupe check failed", "error", dedupeErr.Error())
+		} else if !isNew {
+			a.logger.Info("duplicate outbound event skipped",
+				"event_type", msg.EventType,
+				"session_key", msg.SessionKey,
+				"request_id", msg.RequestID,
+			)
+			return nil
+		}
+	}
+
 	a.logger.Info("webhook dispatching",
 		"event_type", msg.EventType,
 		"session_key", msg.SessionKey,
@@ -151,18 +171,47 @@ func (a *App) SetSessionDelivery(sessionKey string, opts SessionDeliveryOptions)
 	a.mu.Lock()
 	a.delivery[key] = opts
 	a.mu.Unlock()
+
+	if err := a.store.UpsertSessionDelivery(context.Background(), key, store.SessionDelivery{
+		CallbackURL: opts.CallbackURL,
+		Stream:      opts.Stream,
+		UpdatedAt:   opts.CreatedAt,
+	}); err != nil {
+		a.logger.Warn("failed to persist session delivery config", "session_key", key, "error", err.Error())
+	}
 }
 
 func (a *App) getSessionDelivery(sessionKey string) SessionDeliveryOptions {
 	key := strings.TrimSpace(sessionKey)
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	opts, ok := a.delivery[key]
+	a.mu.Unlock()
 	if !ok {
-		return SessionDeliveryOptions{Stream: true}
+		dbOpts, found, err := a.store.GetSessionDelivery(context.Background(), key)
+		if err != nil {
+			a.logger.Warn("failed to load session delivery config", "session_key", key, "error", err.Error())
+			return SessionDeliveryOptions{Stream: true}
+		}
+		if !found {
+			return SessionDeliveryOptions{Stream: true}
+		}
+		out := SessionDeliveryOptions{
+			CallbackURL: dbOpts.CallbackURL,
+			Stream:      dbOpts.Stream,
+			CreatedAt:   dbOpts.UpdatedAt,
+		}
+		a.mu.Lock()
+		a.delivery[key] = out
+		a.mu.Unlock()
+			return out
 	}
-	if time.Since(opts.CreatedAt) > 2*time.Minute {
+	if time.Since(opts.CreatedAt) > a.cfg.DeliveryTTL {
+		a.mu.Lock()
 		delete(a.delivery, key)
+		a.mu.Unlock()
+		if err := a.store.DeleteSessionDelivery(context.Background(), key); err != nil {
+			a.logger.Warn("failed to clear expired session delivery config", "session_key", key, "error", err.Error())
+		}
 		return SessionDeliveryOptions{Stream: true}
 	}
 	return opts
@@ -176,6 +225,29 @@ func (a *App) clearSessionDelivery(sessionKey string) {
 	a.mu.Lock()
 	delete(a.delivery, key)
 	a.mu.Unlock()
+	if err := a.store.DeleteSessionDelivery(context.Background(), key); err != nil {
+		a.logger.Warn("failed to delete session delivery config", "session_key", key, "error", err.Error())
+	}
+}
+
+func (a *App) RegisterInboundDedupe(ctx context.Context, key string) (bool, error) {
+	return a.store.RegisterDedupeKey(ctx, "inbound", key, a.cfg.DedupeRecordTTL)
+}
+
+func (a *App) buildOutboundDedupeKey(msg wsclient.Message) string {
+	material := firstNonEmpty(msg.RequestID, msg.EventType)
+	if strings.TrimSpace(material) == "" {
+		return ""
+	}
+	h := sha256.New()
+	h.Write([]byte(msg.EventType))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.SessionKey))
+	h.Write([]byte("|"))
+	h.Write([]byte(msg.RequestID))
+	h.Write([]byte("|"))
+	h.Write(msg.Raw)
+	return "out:" + hex.EncodeToString(h.Sum(nil))
 }
 
 func isFinalEvent(msg wsclient.Message) bool {

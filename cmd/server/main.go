@@ -21,7 +21,7 @@ func main() {
 	}
 
 	logg := logger.New(cfg.LogLevel)
-	application := app.New(cfg, logg)
+	application := app.New(context.Background(), cfg, logg)
 	apiServer := httpapi.New(cfg, application, logg)
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
