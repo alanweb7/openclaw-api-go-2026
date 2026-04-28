@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/alanweb7/openclaw-2026-api-go/internal/config"
@@ -17,6 +19,15 @@ type App struct {
 	logger  *slog.Logger
 	ws      *wsclient.Client
 	webhook *webhook.Client
+
+	mu       sync.Mutex
+	delivery map[string]SessionDeliveryOptions
+}
+
+type SessionDeliveryOptions struct {
+	CallbackURL string
+	Stream      bool
+	CreatedAt   time.Time
 }
 
 func New(cfg config.Config, logger *slog.Logger) *App {
@@ -25,6 +36,7 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 		logger:  logger.With("component", "app"),
 		ws:      wsclient.New(cfg, logger),
 		webhook: webhook.New(cfg, logger),
+		delivery: map[string]SessionDeliveryOptions{},
 	}
 }
 
@@ -75,6 +87,15 @@ func (a *App) handleMessage(ctx context.Context, msg wsclient.Message) error {
 		return nil
 	}
 
+	delivery := a.getSessionDelivery(msg.SessionKey)
+	if !delivery.Stream && !isFinalEvent(msg) {
+		a.logger.Info("event skipped by stream=false",
+			"event_type", msg.EventType,
+			"session_key", msg.SessionKey,
+		)
+		return nil
+	}
+
 	incoming := events.Incoming{
 		RequestID:  msg.RequestID,
 		EventType:  msg.EventType,
@@ -92,10 +113,21 @@ func (a *App) handleMessage(ctx context.Context, msg wsclient.Message) error {
 		"event_type", msg.EventType,
 		"session_key", msg.SessionKey,
 		"request_id", msg.RequestID,
+		"webhook_url", firstNonEmpty(strings.TrimSpace(delivery.CallbackURL), a.cfg.WebhookURL),
+		"stream", delivery.Stream,
 	)
 
-	if err := a.webhook.Send(ctx, payload); err != nil {
-		return fmt.Errorf("send webhook event %s: %w", msg.EventType, err)
+	var sendErr error
+	if strings.TrimSpace(delivery.CallbackURL) != "" {
+		sendErr = a.webhook.SendToURL(ctx, delivery.CallbackURL, payload)
+	} else {
+		sendErr = a.webhook.Send(ctx, payload)
+	}
+	if sendErr != nil {
+		return fmt.Errorf("send webhook event %s: %w", msg.EventType, sendErr)
+	}
+	if !delivery.Stream {
+		a.clearSessionDelivery(msg.SessionKey)
 	}
 	return nil
 }
@@ -106,4 +138,112 @@ func (a *App) SendSessionMessage(ctx context.Context, sessionKey, message string
 
 func (a *App) CreateSession(ctx context.Context, sessionKey string) (wsclient.CreateSessionResult, error) {
 	return a.ws.CreateSession(ctx, sessionKey)
+}
+
+func (a *App) SetSessionDelivery(sessionKey string, opts SessionDeliveryOptions) {
+	key := strings.TrimSpace(sessionKey)
+	if key == "" {
+		return
+	}
+	if opts.CreatedAt.IsZero() {
+		opts.CreatedAt = time.Now().UTC()
+	}
+	a.mu.Lock()
+	a.delivery[key] = opts
+	a.mu.Unlock()
+}
+
+func (a *App) getSessionDelivery(sessionKey string) SessionDeliveryOptions {
+	key := strings.TrimSpace(sessionKey)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	opts, ok := a.delivery[key]
+	if !ok {
+		return SessionDeliveryOptions{Stream: true}
+	}
+	if time.Since(opts.CreatedAt) > 2*time.Minute {
+		delete(a.delivery, key)
+		return SessionDeliveryOptions{Stream: true}
+	}
+	return opts
+}
+
+func (a *App) clearSessionDelivery(sessionKey string) {
+	key := strings.TrimSpace(sessionKey)
+	if key == "" {
+		return
+	}
+	a.mu.Lock()
+	delete(a.delivery, key)
+	a.mu.Unlock()
+}
+
+func isFinalEvent(msg wsclient.Message) bool {
+	if hasTrue(msg.Frame, "final") || hasTrue(msg.Frame, "done") {
+		return true
+	}
+	params := getMap(msg.Frame, "params")
+	payload := getMap(msg.Frame, "payload")
+	if hasTrue(params, "final") || hasTrue(params, "done") || hasTrue(payload, "final") || hasTrue(payload, "done") {
+		return true
+	}
+	status := strings.ToLower(firstNonEmpty(
+		getString(msg.Frame, "status"),
+		getString(params, "status"),
+		getString(payload, "status"),
+		getString(params, "state"),
+		getString(payload, "state"),
+	))
+	return status == "done" || status == "completed" || status == "final" || status == "finished" || status == "success"
+}
+
+func hasTrue(m map[string]any, key string) bool {
+	if m == nil {
+		return false
+	}
+	raw, ok := m[key]
+	if !ok || raw == nil {
+		return false
+	}
+	v, ok := raw.(bool)
+	return ok && v
+}
+
+func getMap(m map[string]any, key string) map[string]any {
+	if m == nil {
+		return nil
+	}
+	raw, ok := m[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	out, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return out
+}
+
+func getString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	raw, ok := m[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

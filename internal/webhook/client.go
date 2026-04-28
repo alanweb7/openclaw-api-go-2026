@@ -30,6 +30,14 @@ func New(cfg config.Config, logger *slog.Logger) *Client {
 }
 
 func (c *Client) Send(ctx context.Context, payload events.WebhookPayload) error {
+	return c.sendToURL(ctx, c.cfg.WebhookURL, payload)
+}
+
+func (c *Client) SendToURL(ctx context.Context, webhookURL string, payload events.WebhookPayload) error {
+	return c.sendToURL(ctx, webhookURL, payload)
+}
+
+func (c *Client) sendToURL(ctx context.Context, webhookURL string, payload events.WebhookPayload) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal webhook payload: %w", err)
@@ -46,11 +54,12 @@ func (c *Client) Send(ctx context.Context, payload events.WebhookPayload) error 
 			}
 		}
 
-		if err := c.sendOnce(ctx, body); err != nil {
+		if err := c.sendOnce(ctx, webhookURL, body); err != nil {
 			lastErr = err
 			c.logger.Warn("webhook delivery failed",
 				"event_type", payload.EventType,
 				"session_key", payload.SessionKey,
+				"webhook_url", webhookURL,
 				"attempt", attempt,
 				"error", err.Error(),
 			)
@@ -60,6 +69,7 @@ func (c *Client) Send(ctx context.Context, payload events.WebhookPayload) error 
 		c.logger.Info("webhook delivered",
 			"event_type", payload.EventType,
 			"session_key", payload.SessionKey,
+			"webhook_url", webhookURL,
 			"attempt", attempt,
 		)
 		return nil
@@ -67,8 +77,8 @@ func (c *Client) Send(ctx context.Context, payload events.WebhookPayload) error 
 	return fmt.Errorf("webhook delivery failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
-func (c *Client) sendOnce(ctx context.Context, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.WebhookURL, bytes.NewReader(body))
+func (c *Client) sendOnce(ctx context.Context, webhookURL string, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create webhook request: %w", err)
 	}

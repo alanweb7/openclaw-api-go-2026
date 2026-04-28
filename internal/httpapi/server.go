@@ -29,6 +29,8 @@ type sendRequest struct {
 	SessionKey    string `json:"sessionKey"`
 	Message       string `json:"message"`
 	CreateSession bool   `json:"createSession,omitempty"`
+	CallbackURL   string `json:"callbackUrl,omitempty"`
+	Stream        *bool  `json:"stream,omitempty"`
 }
 
 type sendResponse struct {
@@ -126,6 +128,21 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "message is required", http.StatusBadRequest)
 		return
 	}
+	if callbackURL := strings.TrimSpace(req.CallbackURL); callbackURL != "" {
+		if !strings.HasPrefix(strings.ToLower(callbackURL), "http://") && !strings.HasPrefix(strings.ToLower(callbackURL), "https://") {
+			http.Error(w, "callbackUrl must start with http:// or https://", http.StatusBadRequest)
+			return
+		}
+	}
+
+	stream := true
+	if req.Stream != nil {
+		stream = *req.Stream
+	}
+	s.app.SetSessionDelivery(sessionKey, app.SessionDeliveryOptions{
+		CallbackURL: strings.TrimSpace(req.CallbackURL),
+		Stream:      stream,
+	})
 
 	requestID, err := s.app.SendSessionMessage(r.Context(), sessionKey, req.Message)
 	if err != nil && req.CreateSession && strings.Contains(strings.ToLower(err.Error()), "session not found") {
