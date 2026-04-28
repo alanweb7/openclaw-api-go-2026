@@ -204,12 +204,24 @@ func (c *Client) CreateSession(ctx context.Context, sessionKey string) (CreateSe
 		}
 
 		result := CreateSessionResult{RequestID: reqID}
+
+		// Some OpenClaw builds return payload under `result`, while others
+		// return fields directly on the response frame.
 		if rawResult, ok := frame["result"].(map[string]any); ok && rawResult != nil {
 			result.Key = firstNonEmpty(
 				getString(rawResult, "key"),
 				getString(rawResult, "sessionKey"),
 			)
 			result.SessionID = getString(rawResult, "sessionId")
+		}
+		if result.Key == "" {
+			result.Key = firstNonEmpty(
+				getString(frame, "key"),
+				getString(frame, "sessionKey"),
+			)
+		}
+		if result.SessionID == "" {
+			result.SessionID = getString(frame, "sessionId")
 		}
 		if result.Key == "" {
 			return CreateSessionResult{}, fmt.Errorf("sessions.create returned empty key")
