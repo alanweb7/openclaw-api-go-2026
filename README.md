@@ -24,9 +24,17 @@ internal/wsclient
 1. Copie `.env.example` para `.env`.
 2. Preencha ao menos:
 - `OPENCLAW_GATEWAY_TOKEN`
-- `WEBHOOK_URL`
+- `OPENCLAW_WS_URL`
 
 As demais variaveis possuem default seguro conforme o prompt.
+
+Defaults recomendados para acesso externo via API:
+
+- `OPENCLAW_CLIENT_ID=openclaw-tui`
+- `OPENCLAW_CLIENT_MODE=ui`
+- `OPENCLAW_ROLE=operator`
+- `OPENCLAW_SCOPES=operator.read,operator.write`
+- `WEBHOOK_URL=http://localhost:8080/webhook/openclaw` (somente para forwarding interno; nao e endpoint publico da bridge)
 
 ## Execucao local
 
@@ -53,7 +61,13 @@ Endpoints:
 
 - `GET /healthz`
 - `GET /readyz`
+- `POST /v1/sessions/create`
 - `POST /v1/sessions/send`
+
+Observacao:
+
+- O endpoint publico para enviar mensagens e `POST /v1/sessions/send`.
+- `WEBHOOK_URL` e o destino para onde a bridge encaminha eventos recebidos do OpenClaw.
 
 Exemplo de envio:
 
@@ -63,6 +77,16 @@ curl -X POST https://opc-api.pullse.ia.br/v1/sessions/send \
   -d '{
     "sessionKey":"agent:main:guardian",
     "message":"teste via api publica"
+  }'
+```
+
+Exemplo de criacao de sessao:
+
+```bash
+curl -X POST https://opc-api.pullse.ia.br/v1/sessions/create \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionKey":"agent:main:minha-sessao"
   }'
 ```
 

@@ -85,3 +85,7 @@ func (a *App) handleMessage(ctx context.Context, msg wsclient.Message) error {
 func (a *App) SendSessionMessage(ctx context.Context, sessionKey, message string) (string, error) {
 	return a.ws.SendSessionMessage(ctx, sessionKey, message)
 }
+
+func (a *App) CreateSession(ctx context.Context, sessionKey string) (wsclient.CreateSessionResult, error) {
+	return a.ws.CreateSession(ctx, sessionKey)
+}

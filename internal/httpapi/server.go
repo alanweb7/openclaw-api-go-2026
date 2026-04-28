@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -33,6 +35,17 @@ type sendResponse struct {
 	RequestID string `json:"requestId,omitempty"`
 }
 
+type createSessionRequest struct {
+	SessionKey string `json:"sessionKey,omitempty"`
+}
+
+type createSessionResponse struct {
+	OK         bool   `json:"ok"`
+	SessionKey string `json:"sessionKey"`
+	SessionID  string `json:"sessionId,omitempty"`
+	RequestID  string `json:"requestId,omitempty"`
+}
+
 func New(cfg config.Config, application *app.App, logger *slog.Logger) *Server {
 	return &Server{
 		cfg:    cfg,
@@ -45,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
+	mux.HandleFunc("/v1/sessions/create", s.handleCreateSession)
 	mux.HandleFunc("/v1/sessions/send", s.handleSend)
 	return mux
 }
@@ -122,6 +136,36 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sendResponse{
 		OK:        true,
 		RequestID: requestID,
+	})
+}
+
+func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req createSessionRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+	}
+
+	sessionKey := strings.TrimSpace(req.SessionKey)
+	res, err := s.app.CreateSession(r.Context(), sessionKey)
+	if err != nil {
+		s.logger.Error("failed to create session", "error", err.Error(), "session_key", sessionKey)
+		http.Error(w, "failed to create openclaw session", http.StatusBadGateway)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, createSessionResponse{
+		OK:         true,
+		SessionKey: res.Key,
+		SessionID:  res.SessionID,
+		RequestID:  res.RequestID,
 	})
 }
 

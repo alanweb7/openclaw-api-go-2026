@@ -28,6 +28,12 @@ type Message struct {
 	Frame      map[string]any
 }
 
+type CreateSessionResult struct {
+	Key       string
+	SessionID string
+	RequestID string
+}
+
 type Client struct {
 	cfg       config.Config
 	logger    *slog.Logger
@@ -143,6 +149,72 @@ func (c *Client) SendSessionMessage(ctx context.Context, sessionKey, message str
 			return reqID, fmt.Errorf("sessions.send rejected: %v", rawErr)
 		}
 		return reqID, nil
+	}
+}
+
+func (c *Client) CreateSession(ctx context.Context, sessionKey string) (CreateSessionResult, error) {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	defer conn.Close()
+
+	reqID := "create-" + strconv.FormatUint(c.nextID(), 10)
+	params := map[string]any{}
+	if strings.TrimSpace(sessionKey) != "" {
+		params["key"] = strings.TrimSpace(sessionKey)
+	}
+
+	payload := map[string]any{
+		"type":   "req",
+		"id":     reqID,
+		"method": "sessions.create",
+		"params": params,
+	}
+
+	if err := conn.WriteJSON(payload); err != nil {
+		return CreateSessionResult{}, fmt.Errorf("send sessions.create request: %w", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(requestTimeout)); err != nil {
+		return CreateSessionResult{}, fmt.Errorf("set create request deadline: %w", err)
+	}
+	defer conn.SetReadDeadline(time.Time{})
+
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return CreateSessionResult{}, fmt.Errorf("read sessions.create response: %w", err)
+		}
+
+		frame, err := decodeFrame(raw)
+		if err != nil {
+			continue
+		}
+
+		if getString(frame, "type") != "res" {
+			continue
+		}
+		if getString(frame, "id") != reqID {
+			continue
+		}
+
+		if rawErr, ok := frame["error"]; ok && rawErr != nil {
+			return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErr)
+		}
+
+		result := CreateSessionResult{RequestID: reqID}
+		if rawResult, ok := frame["result"].(map[string]any); ok && rawResult != nil {
+			result.Key = firstNonEmpty(
+				getString(rawResult, "key"),
+				getString(rawResult, "sessionKey"),
+			)
+			result.SessionID = getString(rawResult, "sessionId")
+		}
+		if result.Key == "" {
+			return CreateSessionResult{}, fmt.Errorf("sessions.create returned empty key")
+		}
+		return result, nil
 	}
 }
 
