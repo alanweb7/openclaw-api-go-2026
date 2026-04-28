@@ -46,6 +46,8 @@ type Config struct {
 	WSReconnectDelay time.Duration
 
 	LogLevel string
+
+	HTTPListenPort string
 }
 
 func Load() (Config, error) {
@@ -56,10 +58,10 @@ func Load() (Config, error) {
 		OpenClawGatewayToken:   os.Getenv("OPENCLAW_GATEWAY_TOKEN"),
 		OpenClawMinProtocol:    intOrDefault("OPENCLAW_MIN_PROTOCOL", 3),
 		OpenClawMaxProtocol:    intOrDefault("OPENCLAW_MAX_PROTOCOL", 3),
-		OpenClawClientID:       envOrDefault("OPENCLAW_CLIENT_ID", "openclaw-bridge-go"),
+		OpenClawClientID:       envOrDefault("OPENCLAW_CLIENT_ID", "cli"),
 		OpenClawClientVersion:  envOrDefault("OPENCLAW_CLIENT_VERSION", "1.0.0"),
 		OpenClawClientPlatform: envOrDefault("OPENCLAW_CLIENT_PLATFORM", "linux"),
-		OpenClawClientMode:     envOrDefault("OPENCLAW_CLIENT_MODE", "operator"),
+		OpenClawClientMode:     envOrDefault("OPENCLAW_CLIENT_MODE", "cli"),
 		OpenClawRole:           envOrDefault("OPENCLAW_ROLE", "operator"),
 		OpenClawScopes:         splitCSV(envOrDefault("OPENCLAW_SCOPES", "operator.read,operator.write")),
 		OpenClawLocale:         envOrDefault("OPENCLAW_LOCALE", "pt-BR"),
@@ -86,6 +88,8 @@ func Load() (Config, error) {
 		WSReconnectDelay: time.Duration(intOrDefault("WS_RECONNECT_DELAY_SECONDS", 5)) * time.Second,
 
 		LogLevel: strings.ToLower(envOrDefault("LOG_LEVEL", "info")),
+
+		HTTPListenPort: envOrDefault("BRIDGE_HTTP_PORT", "8080"),
 	}
 
 	if err := cfg.Validate(); err != nil {

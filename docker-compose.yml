@@ -3,8 +3,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/alanweb7/openclaw-2026-api-go:local
+    image: ghcr.io/alanweb7/openclaw-api-go-2026:local
     container_name: openclaw-bridge
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.openclaw-bridge.rule=Host(`${TRAEFIK_HOST}`)
+      - traefik.http.routers.openclaw-bridge.entrypoints=websecure
+      - traefik.http.routers.openclaw-bridge.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.services.openclaw-bridge.loadbalancer.server.port=${BRIDGE_HTTP_PORT:-8080}
     env_file:
       - .env
     restart: unless-stopped

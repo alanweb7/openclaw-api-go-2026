@@ -13,6 +13,7 @@ cmd/server
 internal/app
 internal/config
 internal/events
+internal/httpapi
 internal/logger
 internal/webhook
 internal/wsclient
@@ -44,6 +45,25 @@ go run ./cmd/server
 ```bash
 docker compose up -d --build
 docker compose logs -f openclaw-bridge
+```
+
+## API publica da bridge
+
+Endpoints:
+
+- `GET /healthz`
+- `GET /readyz`
+- `POST /v1/sessions/send`
+
+Exemplo de envio:
+
+```bash
+curl -X POST https://opc-api.pullse.ia.br/v1/sessions/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionKey":"agent:main:guardian",
+    "message":"teste via api publica"
+  }'
 ```
 
 ## Handshake OpenClaw

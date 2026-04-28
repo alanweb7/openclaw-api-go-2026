@@ -14,4 +14,5 @@ WORKDIR /app
 
 COPY --from=builder /out/openclaw-bridge /app/openclaw-bridge
 
+EXPOSE 8080
 ENTRYPOINT ["/app/openclaw-bridge"]

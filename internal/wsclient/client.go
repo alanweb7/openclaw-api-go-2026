@@ -17,6 +17,7 @@ import (
 )
 
 const handshakeTimeout = 30 * time.Second
+const requestTimeout = 30 * time.Second
 
 type Message struct {
 	Type       string
@@ -46,17 +47,11 @@ func New(cfg config.Config, logger *slog.Logger) *Client {
 }
 
 func (c *Client) Serve(ctx context.Context, onMessage func(context.Context, Message) error) error {
-	conn, _, err := c.dialer.DialContext(ctx, c.cfg.OpenClawWSURL, nil)
+	conn, err := c.connect(ctx)
 	if err != nil {
-		return fmt.Errorf("dial websocket: %w", err)
-	}
-	defer conn.Close()
-
-	c.logger.Info("websocket connected", "url", c.cfg.OpenClawWSURL)
-
-	if err := c.handshake(ctx, conn); err != nil {
 		return err
 	}
+	defer conn.Close()
 
 	if c.cfg.AutoSendOnConnect {
 		if err := c.sendAutoMessage(conn); err != nil {
@@ -96,6 +91,58 @@ func (c *Client) Serve(ctx context.Context, onMessage func(context.Context, Mess
 				c.logger.Warn("message handler failed", "error", err.Error(), "event_type", msg.EventType)
 			}
 		}
+	}
+}
+
+func (c *Client) SendSessionMessage(ctx context.Context, sessionKey, message string) (string, error) {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	reqID := "send-" + strconv.FormatUint(c.nextID(), 10)
+	payload := map[string]any{
+		"type":   "req",
+		"id":     reqID,
+		"method": "sessions.send",
+		"params": map[string]any{
+			"sessionKey": sessionKey,
+			"message":    message,
+		},
+	}
+
+	if err := conn.WriteJSON(payload); err != nil {
+		return "", fmt.Errorf("send sessions.send request: %w", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(requestTimeout)); err != nil {
+		return "", fmt.Errorf("set send request deadline: %w", err)
+	}
+	defer conn.SetReadDeadline(time.Time{})
+
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return "", fmt.Errorf("read sessions.send response: %w", err)
+		}
+
+		frame, err := decodeFrame(raw)
+		if err != nil {
+			continue
+		}
+
+		if getString(frame, "type") != "res" {
+			continue
+		}
+		if getString(frame, "id") != reqID {
+			continue
+		}
+
+		if rawErr, ok := frame["error"]; ok && rawErr != nil {
+			return reqID, fmt.Errorf("sessions.send rejected: %v", rawErr)
+		}
+		return reqID, nil
 	}
 }
 
@@ -149,6 +196,21 @@ func (c *Client) handshake(_ context.Context, conn *websocket.Conn) error {
 
 	c.logger.Info("handshake completed")
 	return nil
+}
+
+func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
+	conn, _, err := c.dialer.DialContext(ctx, c.cfg.OpenClawWSURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("dial websocket: %w", err)
+	}
+
+	c.logger.Info("websocket connected", "url", c.cfg.OpenClawWSURL)
+	if err := c.handshake(ctx, conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+
+	return conn, nil
 }
 
 func (c *Client) waitForChallenge(conn *websocket.Conn) error {
