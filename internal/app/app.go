@@ -91,6 +91,13 @@ func (a *App) handleMessage(ctx context.Context, msg wsclient.Message) error {
 		a.logger.Debug("event skipped by filter", "event_type", msg.EventType)
 		return nil
 	}
+	if requiresSessionKey(msg.EventType) && strings.TrimSpace(msg.SessionKey) == "" {
+		a.logger.Warn("event skipped: missing session key for session-bound event",
+			"event_type", msg.EventType,
+			"request_id", msg.RequestID,
+		)
+		return nil
+	}
 
 	delivery := a.getSessionDelivery(msg.SessionKey)
 	if !delivery.Stream && !isFinalEvent(msg) {
@@ -322,4 +329,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func requiresSessionKey(eventType string) bool {
+	switch strings.TrimSpace(strings.ToLower(eventType)) {
+	case "session.message", "session.tool", "agent":
+		return true
+	default:
+		return false
+	}
 }

@@ -115,9 +115,13 @@ func (c *Client) Serve(ctx context.Context, onMessage func(context.Context, Mess
 		}
 
 		if onMessage != nil {
-			if err := onMessage(ctx, msg); err != nil {
-				c.logger.Warn("message handler failed", "error", err.Error(), "event_type", msg.EventType)
-			}
+			// Avoid blocking websocket read loop with slow webhook delivery/retries.
+			// RPC responses share the same connection and must continue to be read promptly.
+			go func(m Message) {
+				if err := onMessage(ctx, m); err != nil {
+					c.logger.Warn("message handler failed", "error", err.Error(), "event_type", m.EventType)
+				}
+			}(msg)
 		}
 	}
 }
@@ -475,20 +479,26 @@ func extractRequestID(frame map[string]any) string {
 }
 
 func extractSessionKey(frame map[string]any) string {
-	if v := getString(frame, "sessionKey"); v != "" {
-		return v
+	candidates := []map[string]any{
+		frame,
+		getMap(frame, "params"),
+		getMap(frame, "payload"),
+		getMap(getMap(frame, "result"), "entry"),
+		getMap(getMap(frame, "params"), "entry"),
+		getMap(getMap(frame, "payload"), "entry"),
 	}
-	if v := getString(frame, "key"); v != "" {
-		return v
+	for _, m := range candidates {
+		if m == nil {
+			continue
+		}
+		if v := getString(m, "sessionKey"); v != "" {
+			return v
+		}
+		if v := getString(m, "key"); v != "" {
+			return v
+		}
 	}
-	params, ok := frame["params"].(map[string]any)
-	if !ok || params == nil {
-		return ""
-	}
-	if v := getString(params, "sessionKey"); v != "" {
-		return v
-	}
-	return getString(params, "key")
+	return ""
 }
 
 func getString(data map[string]any, key string) string {
@@ -504,6 +514,21 @@ func getString(data map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(v)
+}
+
+func getMap(data map[string]any, key string) map[string]any {
+	if data == nil {
+		return nil
+	}
+	raw, ok := data[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	out, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return out
 }
 
 func firstNonEmpty(values ...string) string {
