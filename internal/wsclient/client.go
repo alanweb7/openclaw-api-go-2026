@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -335,7 +336,18 @@ func (c *Client) handshake(_ context.Context, conn *websocket.Conn) error {
 }
 
 func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
-	conn, _, err := c.dialer.DialContext(ctx, c.cfg.OpenClawWSURL, nil)
+	headers := http.Header{}
+	if ua := strings.TrimSpace(c.cfg.OpenClawUserAgent); ua != "" {
+		headers.Set("User-Agent", ua)
+	}
+	if origin := strings.TrimSpace(c.cfg.OpenClawWSOrigin); origin != "" {
+		headers.Set("Origin", origin)
+	}
+	if host := wsHost(c.cfg.OpenClawWSURL); host != "" {
+		headers.Set("Host", host)
+	}
+
+	conn, _, err := c.dialer.DialContext(ctx, c.cfg.OpenClawWSURL, headers)
 	if err != nil {
 		return nil, &OpError{
 			Code:  ErrCodeGatewayConnectivity,
@@ -351,6 +363,14 @@ func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
 	}
 
 	return conn, nil
+}
+
+func wsHost(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(u.Host)
 }
 
 func (c *Client) waitForChallenge(conn *websocket.Conn, timeout time.Duration) (bool, error) {

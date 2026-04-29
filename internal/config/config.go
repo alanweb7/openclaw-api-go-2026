@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ type Config struct {
 	OpenClawScopes         []string
 	OpenClawLocale         string
 	OpenClawUserAgent      string
+	OpenClawWSOrigin       string
 	OpenClawSessionKey     string
 
 	WebhookURL        string
@@ -70,6 +72,7 @@ func Load() (Config, error) {
 		OpenClawScopes:         splitCSV(envOrDefault("OPENCLAW_SCOPES", "operator.read,operator.write")),
 		OpenClawLocale:         envOrDefault("OPENCLAW_LOCALE", "pt-BR"),
 		OpenClawUserAgent:      envOrDefault("OPENCLAW_USER_AGENT", "openclaw-bridge-go/1.0.0"),
+		OpenClawWSOrigin:       strings.TrimSpace(os.Getenv("OPENCLAW_WS_ORIGIN")),
 		OpenClawSessionKey:     envOrDefault("OPENCLAW_SESSION_KEY", "agent:main:guardian"),
 
 		WebhookURL:        os.Getenv("WEBHOOK_URL"),
@@ -102,6 +105,9 @@ func Load() (Config, error) {
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
+	}
+	if cfg.OpenClawWSOrigin == "" {
+		cfg.OpenClawWSOrigin = deriveOriginFromWSURL(cfg.OpenClawWSURL)
 	}
 	return cfg, nil
 }
@@ -194,4 +200,19 @@ func splitCSV(value string) []string {
 
 func (c Config) String() string {
 	return fmt.Sprintf("ws=%s webhook=%s reconnect=%t", c.OpenClawWSURL, c.WebhookURL, c.WSReconnect)
+}
+
+func deriveOriginFromWSURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss":
+		return "https://" + u.Host
+	case "ws":
+		return "http://" + u.Host
+	default:
+		return ""
+	}
 }
