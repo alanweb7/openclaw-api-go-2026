@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -46,18 +47,24 @@ func (c *Client) SendCommand(ctx context.Context, command string) (string, error
 	}
 	defer conn.Close()
 
-	if err := sendCommandWithFallback(conn, command); err != nil {
+	if err := initializeTTY(conn); err != nil {
+		return "", err
+	}
+
+	marker := fmt.Sprintf("__HERMES_EXIT__:%d__", time.Now().UnixNano())
+	if err := sendCommandWithFallback(conn, commandWithMarker(command, marker)); err != nil {
 		return "", err
 	}
 
 	deadline := time.Now().Add(c.cfg.HermesTimeout)
 	_ = conn.SetReadDeadline(deadline)
 	var chunks []string
+	seenMarker := false
 	for {
 		_, payload, readErr := conn.ReadMessage()
 		if readErr != nil {
 			if len(chunks) > 0 && isUnexpectedClose(readErr) {
-				return strings.TrimSpace(strings.Join(chunks, "\n")), nil
+				return cleanupTTYOutput(strings.Join(chunks, "\n"), marker), nil
 			}
 			return "", fmt.Errorf("read hermes response: %w", readErr)
 		}
@@ -67,12 +74,32 @@ func (c *Client) SendCommand(ctx context.Context, command string) (string, error
 		out := decodeTTYOutput(payload)
 		if out != "" {
 			chunks = append(chunks, out)
-			joined := strings.TrimSpace(strings.Join(chunks, "\n"))
-			if joined != "" {
-				return joined, nil
+			joined := strings.Join(chunks, "\n")
+			if strings.Contains(joined, marker) {
+				seenMarker = true
+			}
+			if seenMarker {
+				return cleanupTTYOutput(joined, marker), nil
 			}
 		}
 	}
+}
+
+func initializeTTY(conn *websocket.Conn) error {
+	// ttyd expects a terminal resize/init frame on many builds before stdin frames.
+	candidates := [][]byte{
+		[]byte(`1{"columns":120,"rows":40}`),
+		[]byte(`{"columns":120,"rows":40}`),
+	}
+	var lastErr error
+	for _, payload := range candidates {
+		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("write hermes tty init: %w", lastErr)
 }
 
 func (c *Client) dialWithAuthFallback(ctx context.Context, baseURL, token string) (*websocket.Conn, error) {
@@ -140,6 +167,14 @@ func sendCommandWithFallback(conn *websocket.Conn, command string) error {
 		return nil
 	}
 	return fmt.Errorf("write hermes command: %w", lastErr)
+}
+
+func commandWithMarker(command, marker string) string {
+	clean := strings.TrimSpace(command)
+	if clean == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s; printf \"\\n%s:$?\\n\"\n", clean, marker)
 }
 
 func (c *Client) fetchToken(ctx context.Context, wsURL string) (string, error) {
@@ -212,6 +247,29 @@ func decodeTTYOutput(payload []byte) string {
 		return strings.TrimSpace(string(payload[1:]))
 	}
 	return strings.TrimSpace(string(payload))
+}
+
+var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+
+func cleanupTTYOutput(raw, marker string) string {
+	text := strings.ReplaceAll(raw, "\r", "\n")
+	text = ansiRegexp.ReplaceAllString(text, "")
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, marker+":") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "/hermes.sh") {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 func isUnexpectedClose(err error) bool {
