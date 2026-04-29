@@ -54,6 +54,11 @@ type Config struct {
 	DatabaseURL      string
 	DeliveryTTL      time.Duration
 	DedupeRecordTTL  time.Duration
+
+	HermesWSURL      string
+	HermesBasicUser  string
+	HermesBasicPass  string
+	HermesTimeout    time.Duration
 }
 
 func Load() (Config, error) {
@@ -101,6 +106,11 @@ func Load() (Config, error) {
 		DatabaseURL:     strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		DeliveryTTL:     time.Duration(intOrDefault("DELIVERY_TTL_SECONDS", 600)) * time.Second,
 		DedupeRecordTTL: time.Duration(intOrDefault("DEDUPE_RECORD_TTL_SECONDS", 86400)) * time.Second,
+
+		HermesWSURL:     strings.TrimSpace(os.Getenv("HERMES_WS_URL")),
+		HermesBasicUser: strings.TrimSpace(os.Getenv("HERMES_BASIC_USER")),
+		HermesBasicPass: strings.TrimSpace(os.Getenv("HERMES_BASIC_PASS")),
+		HermesTimeout:   time.Duration(intOrDefault("HERMES_TIMEOUT_SECONDS", 15)) * time.Second,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -144,6 +154,9 @@ func (c Config) Validate() error {
 	}
 	if c.DedupeRecordTTL <= 0 {
 		errs = append(errs, "DEDUPE_RECORD_TTL_SECONDS must be > 0")
+	}
+	if c.HermesTimeout <= 0 {
+		errs = append(errs, "HERMES_TIMEOUT_SECONDS must be > 0")
 	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))

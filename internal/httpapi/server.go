@@ -16,6 +16,9 @@ import (
 
 	"github.com/alanweb7/openclaw-2026-api-go/internal/app"
 	"github.com/alanweb7/openclaw-2026-api-go/internal/config"
+	"github.com/alanweb7/openclaw-2026-api-go/internal/events"
+	"github.com/alanweb7/openclaw-2026-api-go/internal/hermes"
+	"github.com/alanweb7/openclaw-2026-api-go/internal/webhook"
 	"github.com/alanweb7/openclaw-2026-api-go/internal/wsclient"
 )
 
@@ -23,6 +26,8 @@ type Server struct {
 	cfg    config.Config
 	app    *app.App
 	logger *slog.Logger
+	hermes *hermes.Client
+	hook   *webhook.Client
 }
 
 type healthResponse struct {
@@ -66,11 +71,25 @@ type createSessionResponse struct {
 	RequestID  string `json:"requestId,omitempty"`
 }
 
+type hermesSendRequest struct {
+	Command     string         `json:"command"`
+	CallbackURL string         `json:"callbackUrl"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
+type hermesSendResponse struct {
+	OK        bool   `json:"ok"`
+	RequestID string `json:"requestId"`
+	Status    string `json:"status"`
+}
+
 func New(cfg config.Config, application *app.App, logger *slog.Logger) *Server {
 	return &Server{
 		cfg:    cfg,
 		app:    application,
 		logger: logger.With("component", "httpapi"),
+		hermes: hermes.New(cfg),
+		hook:   webhook.New(cfg, logger),
 	}
 }
 
@@ -80,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/v1/sessions/create", s.handleCreateSession)
 	mux.HandleFunc("/v1/sessions/send", s.handleSend)
+	mux.HandleFunc("/v1/hermes/send", s.handleHermesSend)
 	return mux
 }
 
@@ -235,6 +255,77 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		SessionID:  res.SessionID,
 		RequestID:  res.RequestID,
 	})
+}
+
+func (s *Server) handleHermesSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req hermesSendRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Command) == "" {
+		http.Error(w, "command is required", http.StatusBadRequest)
+		return
+	}
+	callbackURL := strings.TrimSpace(req.CallbackURL)
+	if callbackURL == "" {
+		http.Error(w, "callbackUrl is required", http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(strings.ToLower(callbackURL), "http://") && !strings.HasPrefix(strings.ToLower(callbackURL), "https://") {
+		http.Error(w, "callbackUrl must start with http:// or https://", http.StatusBadRequest)
+		return
+	}
+
+	requestID := "hermes-" + hex.EncodeToString([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))
+	writeJSON(w, http.StatusAccepted, hermesSendResponse{
+		OK:        true,
+		RequestID: requestID,
+		Status:    "queued",
+	})
+
+	go s.runHermesAndCallback(requestID, callbackURL, req)
+}
+
+func (s *Server) runHermesAndCallback(requestID, callbackURL string, req hermesSendRequest) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.HermesTimeout+5*time.Second)
+	defer cancel()
+
+	result := map[string]any{
+		"ok":        false,
+		"eventType": "hermes.command.result",
+		"requestId": requestID,
+		"command":   req.Command,
+		"metadata":  req.Metadata,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+
+	output, err := s.hermes.SendCommand(ctx, req.Command)
+	if err != nil {
+		result["code"] = "hermes_command_failed"
+		result["error"] = err.Error()
+	} else {
+		result["ok"] = true
+		result["code"] = "hermes_command_ok"
+		result["output"] = output
+	}
+
+	payload := events.WebhookPayload{
+		Source:     "hermes",
+		ReceivedAt: time.Now().UTC(),
+		EventType:  "hermes.command.result",
+		RequestID:  requestID,
+		Raw:        result,
+		Normalized: result,
+	}
+	if sendErr := s.hook.SendToURL(ctx, callbackURL, payload); sendErr != nil {
+		s.logger.Error("hermes callback delivery failed", "request_id", requestID, "error", sendErr.Error())
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
