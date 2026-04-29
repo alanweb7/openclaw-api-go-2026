@@ -39,24 +39,10 @@ func (c *Client) SendCommand(ctx context.Context, command string) (string, error
 		return "", err
 	}
 
-	token, err := c.fetchToken(ctx, baseURL)
+	token, _ := c.fetchToken(ctx, baseURL)
+	conn, err := c.dialWithAuthFallback(ctx, baseURL, token)
 	if err != nil {
 		return "", err
-	}
-	wsURL, err := wsURLWithToken(baseURL, token)
-	if err != nil {
-		return "", err
-	}
-
-	headers := http.Header{}
-	if c.cfg.HermesBasicUser != "" || c.cfg.HermesBasicPass != "" {
-		raw := c.cfg.HermesBasicUser + ":" + c.cfg.HermesBasicPass
-		headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(raw)))
-	}
-
-	conn, _, err := c.dialer.DialContext(ctx, wsURL, headers)
-	if err != nil {
-		return "", fmt.Errorf("dial hermes ws: %w", err)
 	}
 	defer conn.Close()
 
@@ -87,6 +73,53 @@ func (c *Client) SendCommand(ctx context.Context, command string) (string, error
 			}
 		}
 	}
+}
+
+func (c *Client) dialWithAuthFallback(ctx context.Context, baseURL, token string) (*websocket.Conn, error) {
+	basicHeader := http.Header{}
+	if c.cfg.HermesBasicUser != "" || c.cfg.HermesBasicPass != "" {
+		raw := c.cfg.HermesBasicUser + ":" + c.cfg.HermesBasicPass
+		basicHeader.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(raw)))
+	}
+
+	type attempt struct {
+		name    string
+		url     string
+		headers http.Header
+	}
+	attempts := make([]attempt, 0, 3)
+
+	// 1) Basic only
+	if len(basicHeader) > 0 {
+		attempts = append(attempts, attempt{name: "basic", url: baseURL, headers: basicHeader.Clone()})
+	}
+
+	// 2) Token only
+	if strings.TrimSpace(token) != "" {
+		if tokenURL, err := wsURLWithToken(baseURL, token); err == nil {
+			attempts = append(attempts, attempt{name: "token", url: tokenURL, headers: http.Header{}})
+			// 3) Token + Basic
+			if len(basicHeader) > 0 {
+				attempts = append(attempts, attempt{name: "token+basic", url: tokenURL, headers: basicHeader.Clone()})
+			}
+		}
+	}
+
+	// Final fallback: plain no-auth if nothing configured.
+	if len(attempts) == 0 {
+		attempts = append(attempts, attempt{name: "plain", url: baseURL, headers: http.Header{}})
+	}
+
+	var lastErr error
+	for _, a := range attempts {
+		conn, _, err := c.dialer.DialContext(ctx, a.url, a.headers)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", a.name, err)
+			continue
+		}
+		return conn, nil
+	}
+	return nil, fmt.Errorf("dial hermes ws: %w", lastErr)
 }
 
 func sendCommandWithFallback(conn *websocket.Conn, command string) error {
