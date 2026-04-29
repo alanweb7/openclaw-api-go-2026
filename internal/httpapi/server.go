@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,13 +127,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionKey := strings.TrimSpace(req.SessionKey)
-	if sessionKey == "" {
-		sessionKey = buildSessionKey(req.AgentID, req.CustomerID)
-	}
-	if sessionKey == "" {
-		sessionKey = s.cfg.OpenClawSessionKey
-	}
+	sessionKey := resolveSessionKey(req.SessionKey, req.AgentID, req.CustomerID, req.Workspace, s.cfg.OpenClawSessionKey)
 	if sessionKey == "" {
 		http.Error(w, "sessionKey is required", http.StatusBadRequest)
 		return
@@ -146,7 +142,8 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		dedupeKey = strings.TrimSpace(r.Header.Get("X-Idempotency-Key"))
 	}
 	if dedupeKey != "" {
-		isNew, dedupeErr := s.app.RegisterInboundDedupe(r.Context(), "in:"+dedupeKey)
+		scopedDedupeKey := "in:" + sessionKey + ":" + dedupeKey
+		isNew, dedupeErr := s.app.RegisterInboundDedupe(r.Context(), scopedDedupeKey)
 		if dedupeErr != nil {
 			s.logger.Warn("inbound dedupe check failed", "error", dedupeErr.Error())
 		} else if !isNew {
@@ -209,10 +206,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sessionKey := strings.TrimSpace(req.SessionKey)
-	if sessionKey == "" {
-		sessionKey = buildSessionKey(req.AgentID, req.CustomerID)
-	}
+	sessionKey := resolveSessionKey(req.SessionKey, req.AgentID, req.CustomerID, req.Workspace, "")
 
 	res, err := s.app.CreateSessionWithOptions(r.Context(), sessionKey, wsclient.CreateSessionOptions{
 		Workspace: strings.TrimSpace(req.Workspace),
@@ -247,6 +241,30 @@ func buildSessionKey(agentID, customerID string) string {
 		return ""
 	}
 	return agent + ":" + customer
+}
+
+func resolveSessionKey(sessionKey, agentID, customerID, workspace, fallbackSessionKey string) string {
+	key := strings.TrimSpace(sessionKey)
+	if key != "" {
+		return key
+	}
+	if fromIDs := buildSessionKey(agentID, customerID); fromIDs != "" {
+		return fromIDs
+	}
+	if fromWorkspace := buildWorkspaceSessionKey(workspace); fromWorkspace != "" {
+		return fromWorkspace
+	}
+	return strings.TrimSpace(fallbackSessionKey)
+}
+
+func buildWorkspaceSessionKey(workspace string) string {
+	normalized := strings.TrimSpace(strings.ToLower(workspace))
+	if normalized == "" {
+		return ""
+	}
+	sum := sha1.Sum([]byte(normalized))
+	// Keep a short deterministic suffix while preserving readability.
+	return "workspace:" + hex.EncodeToString(sum[:8])
 }
 
 func sanitizeID(v string) string {
