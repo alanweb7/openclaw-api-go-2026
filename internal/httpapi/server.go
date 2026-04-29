@@ -46,6 +46,12 @@ type sendResponse struct {
 	RequestID string `json:"requestId,omitempty"`
 }
 
+type errorResponse struct {
+	OK      bool   `json:"ok"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 type createSessionRequest struct {
 	SessionKey string `json:"sessionKey,omitempty"`
 	AgentID    string `json:"agentId,omitempty"`
@@ -176,15 +182,17 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			Workspace: strings.TrimSpace(req.Workspace),
 			AgentID:   strings.TrimSpace(req.AgentID),
 		}); createErr != nil {
-			s.logger.Error("failed to auto-create missing session", "error", createErr.Error(), "session_key", sessionKey)
-			http.Error(w, "failed to create missing openclaw session", http.StatusBadGateway)
+			code, message := classifyGatewayError(createErr)
+			s.logger.Error("session_create_rejected", "error", createErr.Error(), "session_key", sessionKey, "code", code)
+			writeJSON(w, http.StatusBadGateway, errorResponse{OK: false, Code: code, Message: message})
 			return
 		}
 		requestID, err = s.app.SendSessionMessage(r.Context(), sessionKey, req.Message)
 	}
 	if err != nil {
-		s.logger.Error("failed to send session message", "error", err.Error(), "session_key", sessionKey)
-		http.Error(w, "failed to deliver message to openclaw", http.StatusBadGateway)
+		code, message := classifyGatewayError(err)
+		s.logger.Error(code, "error", err.Error(), "session_key", sessionKey, "code", code)
+		writeJSON(w, http.StatusBadGateway, errorResponse{OK: false, Code: code, Message: message})
 		return
 	}
 
@@ -215,8 +223,9 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		AgentID:   strings.TrimSpace(req.AgentID),
 	})
 	if err != nil {
-		s.logger.Error("failed to create session", "error", err.Error(), "session_key", sessionKey)
-		http.Error(w, "failed to create openclaw session", http.StatusBadGateway)
+		code, message := classifyGatewayError(err)
+		s.logger.Error(code, "error", err.Error(), "session_key", sessionKey, "code", code)
+		writeJSON(w, http.StatusBadGateway, errorResponse{OK: false, Code: code, Message: message})
 		return
 	}
 
@@ -277,4 +286,38 @@ func sanitizeID(v string) string {
 	out = nonIDChars.ReplaceAllString(out, "-")
 	out = strings.Trim(out, "-:.")
 	return out
+}
+
+func classifyGatewayError(err error) (string, string) {
+	if err == nil {
+		return "gateway_connectivity_error", "gateway connectivity error"
+	}
+	switch {
+	case wsclient.IsCode(err, wsclient.ErrCodeWSNotConnected):
+		return "ws_not_connected", "websocket is not connected"
+	case wsclient.IsCode(err, wsclient.ErrCodeConnectRejected):
+		text := strings.ToLower(err.Error())
+		if strings.Contains(text, "device") && strings.Contains(text, "identity") {
+			return "device_identity_required", "gateway rejected connection: device identity required"
+		}
+		return "connect_rejected", "gateway rejected websocket connect"
+	case wsclient.IsCode(err, wsclient.ErrCodeSendRejected):
+		return "send_rejected", "gateway rejected message send"
+	case wsclient.IsCode(err, wsclient.ErrCodeSessionCreateReject):
+		return "session_create_rejected", "gateway rejected session creation"
+	case wsclient.IsCode(err, wsclient.ErrCodeGatewayConnectivity):
+		return "gateway_connectivity_error", "gateway connectivity error"
+	}
+
+	text := strings.ToLower(err.Error())
+	if strings.Contains(text, "session not found") {
+		return "send_rejected", "session not found"
+	}
+	if strings.Contains(text, "device") && strings.Contains(text, "identity") {
+		return "device_identity_required", "gateway rejected connection: device identity required"
+	}
+	if strings.Contains(text, "not connected") {
+		return "ws_not_connected", "websocket is not connected"
+	}
+	return "gateway_connectivity_error", "gateway connectivity error"
 }

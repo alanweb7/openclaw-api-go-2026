@@ -59,6 +59,42 @@ type rpcResponse struct {
 	err   error
 }
 
+type ErrorCode string
+
+const (
+	ErrCodeGatewayConnectivity ErrorCode = "gateway_connectivity_error"
+	ErrCodeWSNotConnected      ErrorCode = "ws_not_connected"
+	ErrCodeConnectRejected     ErrorCode = "connect_rejected"
+	ErrCodeSendRejected        ErrorCode = "send_rejected"
+	ErrCodeSessionCreateReject ErrorCode = "session_create_rejected"
+)
+
+type OpError struct {
+	Code  ErrorCode
+	Op    string
+	Cause error
+}
+
+func (e *OpError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Cause == nil {
+		return fmt.Sprintf("%s: %s", e.Op, e.Code)
+	}
+	return fmt.Sprintf("%s: %s: %v", e.Op, e.Code, e.Cause)
+}
+
+func (e *OpError) Unwrap() error { return e.Cause }
+
+func IsCode(err error, code ErrorCode) bool {
+	var opErr *OpError
+	if !errors.As(err, &opErr) {
+		return false
+	}
+	return opErr != nil && opErr.Code == code
+}
+
 func New(cfg config.Config, logger *slog.Logger) *Client {
 	return &Client{
 		cfg:    cfg,
@@ -138,7 +174,11 @@ func (c *Client) SendSessionMessage(ctx context.Context, sessionKey, message str
 		return reqID, err
 	}
 	if rawErr, ok := frame["error"]; ok && rawErr != nil {
-		return reqID, fmt.Errorf("sessions.send rejected: %v", rawErr)
+		return reqID, &OpError{
+			Code:  ErrCodeSendRejected,
+			Op:    "sessions.send",
+			Cause: fmt.Errorf("%v", rawErr),
+		}
 	}
 	return reqID, nil
 }
@@ -174,10 +214,18 @@ func (c *Client) CreateSession(ctx context.Context, sessionKey string, opts Crea
 				return CreateSessionResult{}, err
 			}
 			if rawErrFallback, ok := frame["error"]; ok && rawErrFallback != nil {
-				return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErrFallback)
+				return CreateSessionResult{}, &OpError{
+					Code:  ErrCodeSessionCreateReject,
+					Op:    "sessions.create",
+					Cause: fmt.Errorf("%v", rawErrFallback),
+				}
 			}
 		} else {
-			return CreateSessionResult{}, fmt.Errorf("sessions.create rejected: %v", rawErr)
+			return CreateSessionResult{}, &OpError{
+				Code:  ErrCodeSessionCreateReject,
+				Op:    "sessions.create",
+				Cause: fmt.Errorf("%v", rawErr),
+			}
 		}
 	}
 
@@ -215,7 +263,11 @@ func (c *Client) CreateSession(ctx context.Context, sessionKey string, opts Crea
 		result.Key = normalizedInputKey
 	}
 	if result.Key == "" {
-		return CreateSessionResult{}, fmt.Errorf("sessions.create returned empty key")
+		return CreateSessionResult{}, &OpError{
+			Code:  ErrCodeSessionCreateReject,
+			Op:    "sessions.create",
+			Cause: fmt.Errorf("returned empty key"),
+		}
 	}
 	return result, nil
 }
@@ -267,7 +319,11 @@ func (c *Client) handshake(_ context.Context, conn *websocket.Conn) error {
 	}
 
 	if err := c.waitForConnectResponse(conn, connectReqID); err != nil {
-		return err
+		return &OpError{
+			Code:  ErrCodeConnectRejected,
+			Op:    "connect",
+			Cause: err,
+		}
 	}
 
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
@@ -281,7 +337,11 @@ func (c *Client) handshake(_ context.Context, conn *websocket.Conn) error {
 func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
 	conn, _, err := c.dialer.DialContext(ctx, c.cfg.OpenClawWSURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("dial websocket: %w", err)
+		return nil, &OpError{
+			Code:  ErrCodeGatewayConnectivity,
+			Op:    "dial",
+			Cause: err,
+		}
 	}
 
 	c.logger.Info("websocket connected", "url", c.cfg.OpenClawWSURL)
@@ -380,7 +440,11 @@ func (c *Client) nextID() uint64 {
 func (c *Client) callRPC(ctx context.Context, reqID, method string, params map[string]any) (map[string]any, error) {
 	conn := c.getActiveConn()
 	if conn == nil {
-		return nil, fmt.Errorf("websocket is not connected")
+		return nil, &OpError{
+			Code:  ErrCodeWSNotConnected,
+			Op:    method,
+			Cause: fmt.Errorf("websocket is not connected"),
+		}
 	}
 
 	resCh := make(chan rpcResponse, 1)
@@ -400,7 +464,11 @@ func (c *Client) callRPC(ctx context.Context, reqID, method string, params map[s
 	err := conn.WriteJSON(payload)
 	c.writeMu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("send %s request: %w", method, err)
+		return nil, &OpError{
+			Code:  ErrCodeGatewayConnectivity,
+			Op:    method,
+			Cause: fmt.Errorf("send request: %w", err),
+		}
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, requestTimeout)
@@ -408,10 +476,21 @@ func (c *Client) callRPC(ctx context.Context, reqID, method string, params map[s
 
 	select {
 	case <-waitCtx.Done():
-		return nil, fmt.Errorf("%s request timeout: %w", method, waitCtx.Err())
+		return nil, &OpError{
+			Code:  ErrCodeGatewayConnectivity,
+			Op:    method,
+			Cause: fmt.Errorf("request timeout: %w", waitCtx.Err()),
+		}
 	case res := <-resCh:
 		if res.err != nil {
-			return nil, res.err
+			if IsCode(res.err, ErrCodeConnectRejected) || IsCode(res.err, ErrCodeGatewayConnectivity) {
+				return nil, res.err
+			}
+			return nil, &OpError{
+				Code:  ErrCodeGatewayConnectivity,
+				Op:    method,
+				Cause: res.err,
+			}
 		}
 		return res.frame, nil
 	}
