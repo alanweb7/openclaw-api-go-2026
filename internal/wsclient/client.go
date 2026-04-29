@@ -3,8 +3,10 @@ package wsclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -223,8 +225,14 @@ func (c *Client) handshake(_ context.Context, conn *websocket.Conn) error {
 		return fmt.Errorf("set handshake deadline: %w", err)
 	}
 
-	if err := c.waitForChallenge(conn); err != nil {
+	receivedChallenge, err := c.waitForChallenge(conn, 2*time.Second)
+	if err != nil {
 		return err
+	}
+	if receivedChallenge {
+		c.logger.Info("received connect challenge")
+	} else {
+		c.logger.Info("connect challenge not received; proceeding with direct connect")
 	}
 
 	connectReqID := "connect-" + strconv.FormatUint(c.nextID(), 10)
@@ -285,11 +293,21 @@ func (c *Client) connect(ctx context.Context) (*websocket.Conn, error) {
 	return conn, nil
 }
 
-func (c *Client) waitForChallenge(conn *websocket.Conn) error {
+func (c *Client) waitForChallenge(conn *websocket.Conn, timeout time.Duration) (bool, error) {
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return false, fmt.Errorf("set challenge deadline: %w", err)
+	}
+	defer func() {
+		_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
+	}()
+
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			return fmt.Errorf("read challenge frame: %w", err)
+			if isTimeout(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("read challenge frame: %w", err)
 		}
 
 		frame, err := decodeFrame(raw)
@@ -300,10 +318,14 @@ func (c *Client) waitForChallenge(conn *websocket.Conn) error {
 		msgType := getString(frame, "type")
 		eventType := extractEventType(frame)
 		if msgType == "event" && eventType == "connect.challenge" {
-			c.logger.Info("received connect challenge")
-			return nil
+			return true, nil
 		}
 	}
+}
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (c *Client) waitForConnectResponse(conn *websocket.Conn, reqID string) error {
