@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,16 +60,19 @@ func (c *Client) SendCommand(ctx context.Context, command string) (string, error
 	}
 	defer conn.Close()
 
-	// ttyd expects stdin frames prefixed with "0".
-	if err := conn.WriteMessage(websocket.TextMessage, []byte("0"+strings.TrimSpace(command)+"\n")); err != nil {
-		return "", fmt.Errorf("write hermes command: %w", err)
+	if err := sendCommandWithFallback(conn, command); err != nil {
+		return "", err
 	}
 
 	deadline := time.Now().Add(c.cfg.HermesTimeout)
 	_ = conn.SetReadDeadline(deadline)
+	var chunks []string
 	for {
 		_, payload, readErr := conn.ReadMessage()
 		if readErr != nil {
+			if len(chunks) > 0 && isUnexpectedClose(readErr) {
+				return strings.TrimSpace(strings.Join(chunks, "\n")), nil
+			}
 			return "", fmt.Errorf("read hermes response: %w", readErr)
 		}
 		if len(payload) == 0 {
@@ -76,9 +80,33 @@ func (c *Client) SendCommand(ctx context.Context, command string) (string, error
 		}
 		out := decodeTTYOutput(payload)
 		if out != "" {
-			return out, nil
+			chunks = append(chunks, out)
+			joined := strings.TrimSpace(strings.Join(chunks, "\n"))
+			if joined != "" {
+				return joined, nil
+			}
 		}
 	}
+}
+
+func sendCommandWithFallback(conn *websocket.Conn, command string) error {
+	clean := strings.TrimSpace(command)
+	if clean == "" {
+		return fmt.Errorf("write hermes command: empty command")
+	}
+	candidates := [][]byte{
+		[]byte("0" + clean + "\n"), // ttyd stdin frame
+		[]byte(clean + "\n"),       // plain text fallback for variant builds
+	}
+	var lastErr error
+	for _, payload := range candidates {
+		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("write hermes command: %w", lastErr)
 }
 
 func (c *Client) fetchToken(ctx context.Context, wsURL string) (string, error) {
@@ -151,6 +179,16 @@ func decodeTTYOutput(payload []byte) string {
 		return strings.TrimSpace(string(payload[1:]))
 	}
 	return strings.TrimSpace(string(payload))
+}
+
+func isUnexpectedClose(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	return websocket.IsCloseError(err, websocket.CloseAbnormalClosure, websocket.CloseGoingAway)
 }
 
 func normalizeWSURL(raw string) (string, error) {
