@@ -127,7 +127,9 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionKey := resolveSessionKey(req.SessionKey, req.AgentID, req.CustomerID, req.Workspace, s.cfg.OpenClawSessionKey)
+	// Never fallback to a global session key for public send requests.
+	// This avoids accidental cross-tenant/shared-memory conversations.
+	sessionKey := resolveSessionKey(req.SessionKey, req.AgentID, req.CustomerID, req.Workspace, "")
 	if sessionKey == "" {
 		http.Error(w, "sessionKey is required", http.StatusBadRequest)
 		return
